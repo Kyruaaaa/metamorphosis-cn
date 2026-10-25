@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rock Clock</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --ink: #222222;
+    --muted: #9a9a9a;
+    --line: rgba(0, 0, 0, .16);
+    --card: #f4f4f4;
+    --serif: "Courier New", Courier, monospace;
+    --sans: "Courier New", Courier, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #ffffff; color: var(--ink); font-family: var(--sans); }
+
+  #stage { position: fixed; inset: 0; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+  #stage.dragging { cursor: grabbing; }
+  #lines { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+  .rock { position: absolute; left: 0; top: 0; width: calc(var(--s) * var(--k, 1)); height: calc(var(--s) * var(--k, 1)); will-change: transform, opacity; cursor: pointer; }
+  .rock-img { width: 100%; height: 100%; }
+  .rock-img.marker { position: relative; }
+  .rock-img.marker::before { content: ""; position: absolute; left: 50%; top: 50%; width: 26%; height: 26%;
+                             transform: translate(-50%, -50%); border-radius: 50%; background: #3a3a3a; }
+  .rock:has(.marker)::after { display: none; }   /* no contact shadow under the circles */
+  /* soft contact shadow so the rock sits on the glass */
+  .rock::after { content: ""; position: absolute; left: 14%; right: 14%; bottom: -7%; height: 18%; z-index: -1;
+                 background: radial-gradient(ellipse at center, rgba(0,0,0,.2), rgba(0,0,0,0) 70%); }
+  .rock-img img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+  /* the 3D view is drawn twice the slot's size so wide rocks aren't clipped; every model
+     sits at the same camera distance, so rocks of equal height look equally tall */
+  .rock-img:has(model-viewer) { position: relative; }
+  .rock-img model-viewer { position: absolute; left: -50%; top: -50%; width: 200%; height: 200%;
+                           pointer-events: none; --poster-color: transparent; --progress-bar-height: 0; }
+  .side .rock-img img { filter: drop-shadow(0 4px 6px rgba(0,0,0,.14)); }
+  /* placeholder with a gas bubble: the stone sits low-left, the bubble rises from it */
+  .rock-img.ph-wrap { position: relative; }
+  .rock-img.ph-wrap > .ph { position: absolute; left: 2%; bottom: 4%; width: 58%; height: 54%; }
+  .bubble { position: absolute; right: 0; top: 0; width: 74%; height: 74%; border-radius: 50% 50% 48% 52% / 52% 50% 50% 48%;
+            background: radial-gradient(circle at 34% 28%, rgba(255,255,255,.95) 0 5%, rgba(255,255,255,.2) 13%, rgba(225,236,238,.1) 55%, rgba(170,195,200,.32) 100%);
+            box-shadow: inset 0 0 0 1px rgba(125,155,162,.5), inset -7px -9px 16px rgba(255,255,255,.65), inset 4px 5px 10px rgba(150,175,182,.25); }
+  .side .rock-img.big { width: calc(var(--side) * 1.35); height: calc(var(--side) * 1.35); }
+  .rock-img.ph {
+    background: radial-gradient(circle at 34% 30%,
+      color-mix(in srgb, var(--c) 55%, white) 0%, var(--c) 48%, color-mix(in srgb, var(--c) 65%, black) 100%);
+    box-shadow: inset -3px -4px 8px rgba(0,0,0,.18);
+  }
+
+  header { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+           padding: 20px 24px; white-space: nowrap; pointer-events: none; z-index: 5000; }
+  header h1 { margin: 0; font: italic 400 22px/1 var(--serif); letter-spacing: .01em; }
+  #counter { font: 400 12px/1 var(--sans); letter-spacing: .12em; color: var(--muted); text-transform: uppercase; opacity: 0; transition: opacity .4s; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 520px) { header { padding: 16px; flex-direction: column; gap: 10px; }  .side span { white-space: normal; text-align: center; letter-spacing: .08em; } }
+  #back { pointer-events: auto; background: none; border: 0; padding: 0; margin-right: 16px; font: 400 12px var(--sans);
+          letter-spacing: .12em; text-transform: uppercase; color: var(--muted); cursor: pointer; opacity: 0; transition: opacity .4s; }
+  #back:hover { color: var(--ink); }
+  body.dial #counter, body.dial #back { opacity: 1; }
+
+  #hint { position: fixed; left: 0; right: 0; bottom: 22px; text-align: center; font: 400 11px var(--sans);
+          letter-spacing: .16em; text-transform: uppercase; color: var(--muted); pointer-events: none; z-index: 5000; transition: opacity .5s; }
+
+  /* info above the active rock */
+  #info { position: absolute; left: 0; right: 0; transform: translateY(8px); display: flex; justify-content: center; align-items: center; gap: var(--gap);
+          opacity: 0; pointer-events: none; transition: opacity .35s ease, transform .35s ease; z-index: 4000; }
+  #info.show { opacity: 1; transform: translateY(0); }
+  #info.show > * { pointer-events: auto; }
+
+  .side { display: flex; flex-direction: column; align-items: center; gap: 8px; width: var(--side); }
+  .side .rock-img { width: var(--side); height: var(--side); }
+  .side span { font: 400 10px var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+
+  /* rectangular at minimum; grows upward for longer text, and scrolls past the space available */
+  .card { width: var(--card-w); min-height: calc(var(--card-w) / var(--card-ratio)); max-height: var(--card-max); background: var(--card); border: 1px solid rgba(0,0,0,.08);
+          padding: 14px 18px 12px; display: flex; flex-direction: column; overflow: hidden; }
+  .card { text-align: center; }
+  .card p .verse { display: block; margin-bottom: .6em; }
+  .card p .verse:last-child { margin-bottom: 0; }
+  .card .no { font: 400 10px var(--sans); letter-spacing: .16em; color: var(--muted); text-transform: uppercase; }
+  .card h2 { margin: 6px 0 2px; font: 400 22px/1.1 var(--serif); }
+  .card .sub:empty { height: 0; margin-bottom: 8px; }   /* no subtitle: keep a little space under the name */
+  .card .sub { font: italic 400 15px var(--serif); color: var(--muted); margin-bottom: 10px; }
+  .card p { margin: 0; min-height: 0; white-space: pre-line; font: 400 12.5px/1.5 var(--sans); overflow: hidden; }
+
+  .card.notes { width: var(--notes-w); height: min(300px, var(--card-max)); }
+  .card.notes textarea { flex: 1; margin-top: 10px; resize: none; border: 0; border-top: 1px solid var(--line); background: transparent;
+          padding: 12px 0 0; font: 400 15px/1.5 var(--serif); color: var(--ink); outline: none; text-align: center; }
+  .card.notes textarea::placeholder { color: var(--muted); font-style: italic; }
+  .card.notes .saved { font: 400 10px var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin-top: 6px; height: 12px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="lines"></canvas>
+</div>
+<div id="info"></div>
+
+<header>
+  <div><button id="back">← Back</button><h1 id="title" style="display:inline"></h1></div>
+  <div id="counter"></div>
+</header>
+<div id="hint">Drag to turn it · press to enter</div>
+
+<!-- 3D viewer for rocks that have a .glb model -->
+<script type="module" src="vendor/model-viewer.min.js"></script>   <!-- bundled copy of model-viewer 3.5.0: no CDN, works where jsDelivr is blocked -->
+<!-- load rocks.js fresh every time, so edits to it show up on reload -->
+<script>document.write('<script src="rocks.js?v=' + Date.now() + '"><\/script>');</script>
+<!-- opened straight from disk, browsers won't load .glb files, so use the packed copy (see embed-models.py) -->
+<script>if (location.protocol === 'file:') document.write('<script src="models/models.js?v=' + Date.now() + '"><\/script>');</script>
+<script>
+(() => {
+  const N = 12, STEP = Math.PI * 2 / N;
+  const SHEET = 1.16;   // the glass sheet is this much larger than the path the rocks sit on
+  const BOX_LIFT = 50;  // px the box and before/after rocks sit above where the plate would put them
+  const DROP = 0.4;     // how far the plate (and the box above it) sinks, as a share of its height (0 = 3 and 9 o'clock on the edge)
+  const ROCKS = window.ROCKS, GENERAL = window.GENERAL_ROCK || { img: "" };
+  document.getElementById('title').textContent = window.SITE_TITLE || '';
+  document.title = window.SITE_TITLE || document.title;
+
+  // placeholder palettes: unfired (cool greys) and fired (warm, oxidised)
+  const RAW   = ['#8f8d84','#9a9483','#7f8379','#a3a091','#868074','#8c8a7e','#958f80','#7b7a72'];
+  const FIRED = ['#b0623e','#8f4a31','#c4834f','#a35a3c','#7a3f2c','#b7744a','#9c5233','#c06f45'];
+  const GENERAL_TONE = '#5a5650';
+
+  const stage = document.getElementById('stage');
+  const cv = document.getElementById('lines'), ctx = cv.getContext('2d');
+  const info = document.getElementById('info');
+  const counter = document.getElementById('counter');
+  const hint = document.getElementById('hint');
+
+  // ── placeholder / image helpers ──
+  function seeded(seed) { let s = seed * 7919 + 13; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
+  function blobRadius(seed) {
+    const r = seeded(seed + 3), v = () => Math.round(38 + r() * 26);
+    return `${v()}% ${v()}% ${v()}% ${v()}% / ${v()}% ${v()}% ${v()}% ${v()}%`;
+  }
+  // use the packed copy of a model when there is one: browsers won't fetch .glb files from file:// pages
+  const modelURLs = {};
+  function modelURL(path) {
+    const b64 = (window.MODEL_DATA || {})[path];
+    if (!b64) return path;
+    if (!modelURLs[path]) {
+      const bin = atob(b64), bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      modelURLs[path] = URL.createObjectURL(new Blob([bytes], { type: 'model/gltf-binary' }));
+    }
+    return modelURLs[path];
+  }
+  // opts (placeholders only): spots – colour of vivid patches; bubble – a clear gas bubble
+  function makeRock(src, tone, seed, alt, opts = {}) {
+    const el = document.createElement('div');
+    el.className = 'rock-img';
+    if (opts.model) {                      // a 3D model, turning slowly
+      const mv = document.createElement('model-viewer');
+      mv.setAttribute('src', modelURL(opts.model));
+      mv.setAttribute('alt', alt || '');
+      mv.setAttribute('auto-rotate', '');
+      mv.setAttribute('auto-rotate-delay', '0');
+      mv.setAttribute('rotation-per-second', '18deg');
+      mv.setAttribute('camera-orbit', opts.modelOrbit || '0deg 80deg 5.2m');   // a 1 m tall rock fills about the slot
+      mv.setAttribute('min-camera-orbit', 'auto auto 0.1m');
+      mv.setAttribute('max-camera-orbit', 'auto auto 100m');
+      mv.setAttribute('interaction-prompt', 'none');
+      mv.setAttribute('disable-zoom', '');
+      mv.setAttribute('exposure', '0.95');
+      mv.setAttribute('field-of-view', '22deg');   // narrow lens: fills more of the frame
+      mv.setAttribute('shadow-intensity', '0');
+      if (opts.modelColor) mv.addEventListener('load', () => {
+        for (const m of mv.model.materials) m.pbrMetallicRoughness.setBaseColorFactor(opts.modelColor);
+      });
+      el.appendChild(mv);
+      return el;
+    }
+    if (src) {
+      const im = new Image(); im.src = src; im.alt = alt || ''; im.draggable = false; el.appendChild(im);
+      return el;
+    }
+    const stone = opts.bubble ? document.createElement('div') : el;
+    stone.classList.add('ph'); stone.style.borderRadius = blobRadius(seed); stone.style.setProperty('--c', tone);
+    if (opts.spots) {
+      const sp = opts.spots;
+      stone.style.backgroundImage = [
+        `radial-gradient(ellipse 34% 26% at 36% 64%, ${sp} 0 45%, transparent 100%)`,
+        `radial-gradient(ellipse 22% 18% at 70% 40%, ${sp} 0 40%, transparent 100%)`,
+        `radial-gradient(ellipse 14% 12% at 58% 80%, ${sp} 0 40%, transparent 100%)`,
+        'radial-gradient(circle at 34% 30%, color-mix(in srgb, var(--c) 55%, white) 0%, var(--c) 48%, color-mix(in srgb, var(--c) 65%, black) 100%)',
+      ].join(',');
+    }
+    if (opts.bubble) {
+      el.classList.add('ph-wrap');
+      const b = document.createElement('div'); b.className = 'bubble';
+      el.append(stone, b);
+    }
+    return el;
+  }
+  // index among the 8 non-general rocks, for palette picking
+  const rockNo = []; { let k = 0; ROCKS.forEach((r, i) => rockNo[i] = r.general ? -1 : k++); }
+  // .glb models: `model` on the clock, `modelBefore` / `modelAfter` in the before / after-kiln views
+  const modelOpts = (r, base = {}, path = r.model) => path ? { ...base, model: path, modelColor: r.modelColor, modelOrbit: r.modelOrbit } : base;
+  function mainRock(i, seedShift = 0) {
+    const r = ROCKS[i];
+    if (r.general && r.model) return makeRock('', GENERAL_TONE, 99, r.title || 'general', modelOpts(r));   // a small lava rock
+    if (r.general) {                      // 12, 3, 6, 9 without a model: a small circle
+      const el = document.createElement('div'); el.className = 'rock-img marker';
+      el.setAttribute('aria-label', r.title || 'general');
+      return el;
+    }
+    const k = rockNo[i], ph = r.placeholder || {};
+    return makeRock(r.img || r.after, ph.after || FIRED[k % FIRED.length], k + 1 + seedShift, r.name, modelOpts(r, ph));
+  }
+
+  // ── the 12 rocks on the plate ──
+  const rocks = [];
+  for (let i = 0; i < N; i++) {
+    const el = document.createElement('div'); el.className = 'rock'; el.dataset.i = i; el.appendChild(mainRock(i)); stage.appendChild(el); rocks.push(el);
+    if (ROCKS[i].size) el.style.setProperty('--k', ROCKS[i].size);
+  }
+
+  // ── state ──
+  let W, H, DPR, S, rx, ry, cx, cy;
+  let p = 0, dir = 0, t = 0;           // intro→dial progress (p linear, t eased)
+  // start page: the plate's 3D orientation is a quaternion [w, x, y, z]. Dragging turns it about
+  // the screen's own axes (like rolling a ball), so it always moves the way you drag. Left alone,
+  // it eases back to resting on a slight tilt, turning slowly like a turntable.
+  const REST_TILT = 0.35, BASE_SPIN = 0.00018;      // rad, rad/ms
+  const qMul = (a, b) => [
+    a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+    a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+    a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+    a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]];
+  const qAxis = (x, y, z, a) => [Math.cos(a / 2), x * Math.sin(a / 2), y * Math.sin(a / 2), z * Math.sin(a / 2)];
+  const qNorm = q => { const n = Math.hypot(...q); return q.map(v => v / n); };
+  function qSlerp(a, b, k) {
+    let d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    if (d < 0) { b = b.map(v => -v); d = -d; }
+    if (d > 0.9995) return qNorm(a.map((v, i) => v + (b[i] - v) * k));
+    const th = Math.acos(d), s = Math.sin(th);
+    return a.map((v, i) => v * Math.sin((1 - k) * th) / s + b[i] * Math.sin(k * th) / s);
+  }
+  function qMat([w, x, y, z]) {        // rows: screen x, screen y (down), depth
+    return [[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]];
+  }
+  const qRest = s => qMul(qAxis(1, 0, 0, REST_TILT), qAxis(0, 1, 0, s));
+  let spin = 0.5, orient = qRest(spin);
+  let spinX = 0, spinY = 0, idleSince = 0;           // drag momentum (rad/ms) and when it was let go
+  let rot = 0, rotTarget = 0, rotVel = 0;
+  let active = -1, shown = -1, dirty = true, lastRot = NaN;
+  let ANG = [];                        // each rock's direction from the oval's centre
+
+  function resize() {
+    DPR = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+    cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    S = Math.max(44, Math.min(82, Math.min(W, H) * 0.085));
+    const narrow = W < 520;
+    const side = Math.round(Math.max(54, Math.min(130, S * 1.7)));
+    const gap = narrow ? 12 : Math.round(Math.max(80, Math.min(160, W * 0.09)));
+    const cardW = Math.max(160, Math.min(380, W - side * 2 - gap * 2 - 32));
+    const ratio = narrow ? 0.9 : 1.8, cardH = cardW / ratio;
+    // the plate rests on the bottom (3 and 9 o'clock at the bottom edge) and grows up to just under the box
+    const top = narrow ? 100 : 64;
+    const boxBottom = top + Math.max(cardH, side + 24);
+    cx = W / 2; cy = H - S * 0.5;
+    ry = Math.max(120, (cy - boxBottom - 18) / SHEET);
+    const sink = ry * DROP;                            // sink the plate below the bottom edge; the box follows it down
+    cy += sink;
+    rx = Math.min(ry / 1.3, W * 0.42);
+    stage.style.setProperty('--s', S + 'px');
+    info.style.setProperty('--card-ratio', ratio);
+    info.style.setProperty('--gap', gap + 'px');
+    info.style.setProperty('--side', side + 'px');
+    info.style.setProperty('--card-w', cardW + 'px');
+    info.style.setProperty('--notes-w', Math.min(520, W - 32) + 'px');
+    info.style.setProperty('--card-max', Math.max(140, boxBottom + sink - BOX_LIFT - top - 8) + 'px');
+    // the box stays put: placed above the oval's tallest reach (upright), so no turn can reach it
+    info.style.bottom = (H - boxBottom - sink + BOX_LIFT) + 'px';
+    rockAngles();
+    dirty = true;
+  }
+  addEventListener('resize', () => { resize(); shown = -1; }); resize();
+
+  // ── geometry ──
+  // The plate is one rigid object: the oval and its rocks turn together as a single shape.
+  // Rocks live in "plate space", a unit circle where clock angle φ sits at (sin φ, −cos φ).
+  // A 2D affine matrix M (oval scale, then the turn `rot`) maps plate space to the screen:
+  //   start page – the plate turned in 3D (orient), seen face-on as it settles
+  //   dial       – an upright oval resting at the bottom of the page
+  // Morphing between the two is just blending the two matrices.
+  const AX = 1 / 1.3;                  // the plate is an upright oval: width / height
+  const clamp01 = v => Math.max(0, Math.min(1, v));
+  const lerp = (a, b, k) => a + (b - a) * k;
+  const dialFade = d => d >= 0 ? 1 : clamp01(1 - 0.9 * d * d);   // 3 o'clock full, 4–5 fading
+  const ease = k => k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+
+  function introMatrix(q) {
+    const R = Math.min(W, H) * 0.36;
+    // the 3D rotation's rows for screen x, y and depth
+    const m = qMat(q);
+    const q00 = m[0][0], q01 = m[0][1], q10 = m[1][0], q11 = m[1][1], q20 = m[2][0], q21 = m[2][1];
+    // oval scale, then the plate's turn
+    const cr = Math.cos(rot), sr = Math.sin(rot);
+    const l00 = R * AX * cr, l01 = -R * sr, l10 = R * AX * sr, l11 = R * cr;
+    return {
+      a: q00 * l00 + q01 * l10, c: q00 * l01 + q01 * l11,
+      b: q10 * l00 + q11 * l10, d: q10 * l01 + q11 * l11,
+      e: W / 2, f: H / 2,
+      za: (q20 * l00 + q21 * l10) / R, zc: (q20 * l01 + q21 * l11) / R,   // depth, −1..1
+      tx: m[0][2] * 7, ty: m[1][2] * 7,                                  // glass thickness, px
+      gx: m[0][2], gy: m[1][2],                                         // which way the face points, for reflections
+    };
+  }
+  function dialMatrix() {
+    const cr = Math.cos(rot), sr = Math.sin(rot);
+    return { a: rx * cr, b: rx * sr, c: -ry * sr, d: ry * cr, e: cx, f: cy, za: 0, zc: 0, tx: 0, ty: 5, gx: 0, gy: 0 };
+  }
+  function currentMatrix() {
+    // on the way into the dial the plate swings round to face the viewer
+    const mi = introMatrix(t > 0 ? qSlerp(orient, [1, 0, 0, 0], t) : orient);
+    if (t === 0) return mi;
+    const md = dialMatrix(), m = {};
+    for (const key in mi) m[key] = lerp(mi[key], md[key], t);
+    return m;
+  }
+  const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
+  function rockAngles() {
+    ANG = [];
+    for (let i = 0; i < N; i++) {
+      const x = rx * Math.sin(i * STEP), y = ry * Math.cos(i * STEP);
+      ANG.push(Math.atan2(x, y));
+    }
+  }
+  function nearestRock(r) {
+    let best = 0;
+    for (let i = 1; i < N; i++) if (Math.abs(wrap(r + ANG[i])) < Math.abs(wrap(r + ANG[best]))) best = i;
+    return best;
+  }
+  const apply = (M, u, v) => [M.a * u + M.c * v + M.e, M.b * u + M.d * v + M.f];
+
+  // ── glass ──
+  function ringPath(M, r, ox = 0, oy = 0, seg = 110) {
+    const path = new Path2D();
+    for (let j = 0; j <= seg; j++) {
+      const a = j / seg * Math.PI * 2, [x, y] = apply(M, r * Math.sin(a), -r * Math.cos(a));
+      j ? path.lineTo(x + ox, y + oy) : path.moveTo(x + ox, y + oy);
+    }
+    path.closePath();
+    return path;
+  }
+  function drawGlass(M) {
+    const sheet = ringPath(M, SHEET);
+    const hx = Math.hypot(M.a, M.c) * SHEET, hy = Math.hypot(M.b, M.d) * SHEET;
+
+    // 1. soft shadow the plate casts on the page
+    ctx.save();
+    ctx.shadowColor = 'rgba(70, 95, 105, 0.16)'; ctx.shadowBlur = 34; ctx.shadowOffsetY = 18;
+    ctx.fillStyle = '#ffffff'; ctx.fill(sheet);
+    ctx.restore();
+
+    // 2. the plate's edge (thickness), slightly green like real glass
+    const back = ringPath(M, SHEET, M.tx, M.ty);
+    ctx.fillStyle = 'rgba(168, 204, 196, 0.45)'; ctx.fill(back);
+    ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(105, 145, 138, 0.45)'; ctx.stroke(back);
+
+    // 3. the face: clearer in the middle, denser towards the rim
+    const det = M.a * M.d - M.b * M.c;
+    if (Math.abs(det) > 1) {
+      ctx.save();
+      ctx.setTransform(DPR * M.a, DPR * M.b, DPR * M.c, DPR * M.d, DPR * M.e, DPR * M.f);
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, SHEET);
+      g.addColorStop(0,    'rgba(246, 250, 251, 0.75)');
+      g.addColorStop(0.72, 'rgba(234, 243, 245, 0.75)');
+      g.addColorStop(0.92, 'rgba(212, 229, 232, 0.85)');
+      g.addColorStop(1,    'rgba(182, 208, 212, 0.95)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(0, 0, SHEET, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    } else {
+      ctx.fillStyle = 'rgba(200, 222, 226, 0.8)'; ctx.fill(sheet);
+    }
+
+    // 4. reflections of the room: fixed to the light, so they slide as the plate tilts
+    ctx.save(); ctx.clip(sheet);
+    const sh = 0.32 + 0.18 * M.gx - 0.08 * M.gy;
+    const lg = ctx.createLinearGradient(M.e - hx, M.f - hy, M.e + hx, M.f + hy);
+    const stops = [[sh - 0.14, 0], [sh - 0.02, 0.55], [sh + 0.03, 0.08], [sh + 0.16, 0], [sh + 0.22, 0.32], [sh + 0.27, 0]];
+    for (const [o, a] of stops) lg.addColorStop(clamp01(o), `rgba(255,255,255,${a})`);
+    ctx.fillStyle = lg; ctx.fillRect(M.e - hx, M.f - hy, hx * 2, hy * 2);
+    ctx.restore();
+
+    // 5. the rim: a dark outer line and a bright polished inner edge
+    ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.stroke(ringPath(M, SHEET * 0.985));
+    ctx.lineWidth = 1.2; ctx.strokeStyle = 'rgba(105, 132, 138, 0.6)'; ctx.stroke(sheet);
+  }
+
+  function placeRocks(M) {
+    for (let i = 0; i < N; i++) {
+      const a = i * STEP, u = Math.sin(a), v = -Math.cos(a);
+      const [x, y] = apply(M, u, v);
+      const z = M.za * u + M.zc * v;                       // start page depth, −1..1
+      const c = Math.cos(rot + ANG[i]);                    // dial: 1 at the top
+      const sc = lerp(0.9 + 0.14 * z, 0.85 + 0.6 * Math.pow(Math.max(0, c), 10), t);
+      const op = lerp(0.8 + 0.2 * (z + 1) / 2, dialFade(c), t);
+      setRock(rocks[i], x, y, sc, op, lerp(z, c, t));
+    }
+  }
+  function setRock(el, x, y, sc, op, z) {
+    el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -50%) scale(${sc.toFixed(3)})`;
+    const o = op.toFixed(2); if (el._o !== o) { el.style.opacity = o; el._o = o; }
+    const zi = 1000 + Math.round(z * 50); if (el._z !== zi) { el.style.zIndex = zi; el._z = zi; }
+  }
+
+  // ── info panel ──
+  const pad = n => String(n).padStart(2, '0');
+  function renderInfo(i) {
+    const r = ROCKS[i];
+    info.innerHTML = '';
+    const pos = i === 0 ? 12 : i;
+    if (r.general && !r.text) {          // a general point with no text: an editable notes space
+      const card = document.createElement('div'); card.className = 'card notes';
+      const key = 'rockclock-notes-' + i;
+      let saved = ''; try { saved = localStorage.getItem(key) || ''; } catch (e) {}
+      card.innerHTML = `<div class="no">${pad(pos)} o'clock · general</div><h2></h2>
+        <textarea placeholder="Write rock and project ideas here…"></textarea><div class="saved"></div>`;
+      card.querySelector('h2').textContent = r.title || 'Notes';
+      const ta = card.querySelector('textarea'), st = card.querySelector('.saved');
+      ta.value = saved;
+      let timer;
+      ta.addEventListener('input', () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { try { localStorage.setItem(key, ta.value); st.textContent = 'Saved'; } catch (e) { st.textContent = 'Not saved'; } }, 400);
+      });
+      info.appendChild(card);
+    } else {
+      const k = rockNo[i];
+      const ph = r.placeholder || {};
+      const side = (src, tone, label, seed, opts, big) => {
+        const d = document.createElement('div'); d.className = 'side';
+        const img = makeRock(src, tone, seed, label, opts);
+        if (big) img.classList.add('big');
+        d.appendChild(img);
+        const s = document.createElement('span'); s.textContent = label; d.appendChild(s);
+        return d;
+      };
+      const card = document.createElement('div'); card.className = 'card';
+      card.innerHTML = `<div class="no">${pad(pos)} o'clock</div><h2></h2><div class="sub"></div><p></p>`;
+      card.querySelector('h2').textContent = r.name || r.title || '';
+      card.querySelector('.sub').textContent = r.subtitle || '';
+      // verses (split on blank lines) get a half-line gap instead of a full empty line
+      const para = card.querySelector('p');
+      for (const verse of (r.text || '').split(/\n\s*\n/)) {
+        const v = document.createElement('span'); v.className = 'verse'; v.textContent = verse; para.appendChild(v);
+      }
+      if (r.general) info.append(card);   // general points with text: just the box
+      else info.append(side(r.before, ph.before || RAW[k % RAW.length], 'Before kiln', k + 1, modelOpts(r, {}, r.modelBefore ?? null)),
+                       card,
+                       side(r.after, ph.after || FIRED[k % FIRED.length], 'After kiln', k + 1, modelOpts(r, ph, r.modelAfter ?? null), (r.size || 1) > 1 && !r.model));   // a model's size only offsets its padding on the clock
+    }
+    const r2 = ROCKS[i];
+    counter.textContent = `${pad(pos)} / 12 — ${r2.general ? (r2.title || 'Notes') : r2.name}`;
+  }
+
+  // the whole text should be readable at first sight: shrink it until it fits the box
+  function fitText() {
+    // a long name shrinks to stay on one line
+    const h = info.querySelector('.card h2');
+    if (h) {
+      let hs = 22;
+      h.style.fontSize = hs + 'px';
+      while (h.offsetHeight > hs * 1.6 && hs > 15) { hs -= 1; h.style.fontSize = hs + 'px'; }
+    }
+    const p = info.querySelector('.card p');
+    if (!p) return;
+    let size = 12.5;
+    p.style.fontSize = size + 'px';
+    while (p.scrollHeight > p.clientHeight + 1 && size > 9) { size -= 0.5; p.style.fontSize = size + 'px'; }
+  }
+
+  // ── input ──
+  let down = null;
+  stage.addEventListener('pointerdown', e => {
+    down = { x: e.clientX, y: e.clientY, t: performance.now(), moved: false, startRot: rot,
+             lastX: e.clientX, lastY: e.clientY, lastT: performance.now(), target: e.target.closest('.rock') };
+    stage.classList.add('dragging');
+  });
+  addEventListener('pointermove', e => {
+    if (!down) return;
+    const dx = e.clientX - down.x;
+    if (Math.abs(dx) > 5 || Math.abs(e.clientY - down.y) > 5) down.moved = true;
+    const now = performance.now(), ddx = e.clientX - down.lastX, ddy = e.clientY - down.lastY, ddt = Math.max(1, now - down.lastT);
+    if (dir > 0) {                       // dial
+      rot = rotTarget = down.startRot + dx / rx;
+      rotVel = ddx / rx / ddt;
+    } else {                             // start page: roll the plate the way you drag
+      const ax = ddx * 0.008, ay = -ddy * 0.008;
+      orient = qNorm(qMul(qMul(qAxis(1, 0, 0, ay), qAxis(0, 1, 0, ax)), orient));
+      spinY = ax / ddt; spinX = ay / ddt;
+    }
+    down.lastX = e.clientX; down.lastY = e.clientY; down.lastT = now;
+  });
+  addEventListener('pointerup', () => {
+    if (!down) return;
+    stage.classList.remove('dragging');
+    idleSince = performance.now();
+    if (dir <= 0) {                      // rest from the direction it was left facing, not an old one
+      const m = qMat(orient);
+      spin = Math.atan2(m[0][2], m[0][0]);
+    }
+    const d = down; down = null;
+    if (!d.moved) {                       // a press
+      if (dir <= 0) { enter(); if (d.target) goTo(+d.target.dataset.i); return; }
+      if (d.target) { goTo(+d.target.dataset.i); return; }
+      return;
+    }
+    if (dir > 0) {
+      const projected = rot + rotVel * 220;
+      const i = nearestRock(projected);
+      rotTarget = projected - wrap(projected + ANG[i]);
+    }
+  });
+  addEventListener('pointercancel', () => { down = null; stage.classList.remove('dragging'); });
+
+  function goTo(i) {
+    // turn the shortest way so rock i sits at the top
+    rotTarget = rot - wrap(rot + ANG[i]);
+  }
+  function step(n) {
+    const i = nearestRock(rotTarget), j = (i + n + N) % N;
+    rotTarget = rotTarget - wrap(rotTarget + ANG[j]);
+  }
+
+  let wheelLock = 0;
+  stage.addEventListener('wheel', e => {
+    if (dir <= 0) return;
+    e.preventDefault();
+    const now = performance.now(); if (now < wheelLock) return;
+    const v = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (Math.abs(v) < 4) return;
+    step(v > 0 ? 1 : -1); wheelLock = now + 260;
+  }, { passive: false });
+
+  addEventListener('keydown', e => {
+    if (e.target.tagName === 'TEXTAREA') { if (e.key === 'Escape') e.target.blur(); return; }
+    if (dir > 0) {
+      if (e.key === 'ArrowRight') step(1);
+      else if (e.key === 'ArrowLeft') step(-1);
+      else if (e.key === 'Escape') exit();
+    } else if (e.key === 'Enter' || e.key === ' ') enter();
+  });
+  document.getElementById('back').addEventListener('click', exit);
+
+  function enter() {
+    dir = 1; document.body.classList.add('dial'); hint.textContent = 'Drag to turn · click a rock';
+    spinX = spinY = 0;                   // the plate swings round to face-on (see currentMatrix)
+    rotTarget = rot - wrap(rot + ANG[nearestRock(rot)]);
+  }
+  function exit() {
+    dir = -1; document.body.classList.remove('dial'); hint.textContent = 'Drag to turn it · press to enter';
+    orient = qRest(spin);                // leave the dial back onto the calm resting turn
+    info.classList.remove('show'); shown = -1;
+  }
+
+  // ── loop ──
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(100, now - last); last = now;
+
+    if (dir) { p = clamp01(p + dir * dt / 1400); if (p === 0) dir = 0; }
+    t = ease(p);
+
+    // start page: after a drag the plate coasts to a stop, then eases back to its slow resting turn
+    if (dir === 0 && !down) {
+      const fade = Math.exp(-dt / 350);
+      spinX *= fade; spinY *= fade;
+      orient = qNorm(qMul(qMul(qAxis(1, 0, 0, spinX * dt), qAxis(0, 1, 0, spinY * dt)), orient));
+      spin += BASE_SPIN * dt;
+      if (now - idleSince > 900) orient = qSlerp(orient, qRest(spin), 1 - Math.exp(-dt / 1400));
+    }
+    // dial easing to the snapped position
+    if (!down && dir > 0) {
+      rot += (rotTarget - rot) * (1 - Math.exp(-dt / 110));
+      if (Math.abs(rotTarget - rot) < 0.0005) rot = rotTarget;
+    }
+
+    // at rest on the dial nothing moves, so skip drawing
+    const idle = dir > 0 && p === 1 && rot === lastRot;
+    if (!idle || dirty) {
+      ctx.clearRect(0, 0, W, H);
+      const M = currentMatrix();
+      drawGlass(M);
+      placeRocks(M);
+      lastRot = (dir > 0 && p === 1) ? rot : NaN;
+      dirty = false;
+    }
+
+    // which rock is on top, and is the dial at rest?
+    if (dir > 0) {
+      active = nearestRock(rot);
+      const settled = !down && Math.abs(rotTarget - rot) < 0.004 && p === 1;
+      if (settled) {
+        if (shown !== active) {
+          renderInfo(active); shown = active; fitText();
+        }
+        info.classList.add('show');
+      } else if (!info.contains(document.activeElement)) {
+        info.classList.remove('show');
+        if (Math.abs(rotTarget - rot) > STEP * 0.4 || down?.moved) shown = -1;
+      }
+      hint.style.opacity = settled ? 0.7 : 1;
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
